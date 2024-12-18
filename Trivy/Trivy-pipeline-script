@@ -1,0 +1,33 @@
+stage('Trivy Vulnerability Scan') {
+    steps {
+        script {
+            def imageTag = "${env.BUILD_NUMBER}"
+            echo "Running Trivy scan on ${DOCKER_IMAGE}:${imageTag}..."
+
+            def trivyExitCode = sh(
+                script: "trivy image --exit-code 1 --severity HIGH,CRITICAL ${DOCKER_IMAGE}:${imageTag}",
+                returnStatus: true
+            )
+
+            if (trivyExitCode != 0) {
+                echo "CRITICAL vulnerabilities detected during the Trivy scan."
+
+                def userAction = input(
+                    id: 'TrivyDecision',
+                    message: 'Trivy detected HIGH/CRITICAL vulnerabilities. Do you want to proceed or abort?',
+                    parameters: [
+                        choice(name: 'ACTION', choices: 'Proceed\nAbort', description: 'Choose your action.')
+                    ]
+                )
+
+                if (userAction == 'Abort') {
+                    error "Pipeline aborted due to detected vulnerabilities."
+                } else {
+                    echo "User chose to proceed despite vulnerabilities."
+                }
+            } else {
+                echo "No HIGH/CRITICAL vulnerabilities found. Proceeding."
+            }
+        }
+    }
+}

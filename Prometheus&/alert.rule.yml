@@ -1,0 +1,83 @@
+groups:
+  - name: server-alerts
+    rules:
+      # Server Down Alert
+      - alert: ServerDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Server Down Alert"
+          description: "The server {{ $labels.instance }} is down and unreachable for the past 1 minute."
+
+      # High CPU Usage Alert
+      - alert: HighCPUUsage
+        expr: 100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[2m])) * 100) > 80
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU Usage Alert"
+          description: "CPU usage is above 80% on {{ $labels.instance }} for more than 2 minutes."
+
+      # High Memory Usage Alert
+      - alert: HighMemoryUsage
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 80
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High Memory Usage Alert"
+          description: "Memory usage is above 80% on {{ $labels.instance }} for more than 2 minutes."
+
+      # High Disk Usage Alert
+      - alert: HighDiskUsage
+        expr: (1 - (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"})) * 100 > 80
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High Disk Usage Alert"
+          description: "Disk usage is above 80% on {{ $labels.instance }} for more than 2 minutes."
+
+      # Node Exporter Down Alert
+      - alert: NodeExporterDown
+        expr: up{job="node-exporter"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node Exporter Down Alert"
+          description: "The Node Exporter on {{ $labels.instance }} is down or unreachable for the past 1 minute."
+
+
+      # Container Alert
+      - alert: ContainerDown
+        expr: time() - container_last_seen > 60
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Container {{ $labels.name }} is down"
+          description: "Container {{ $labels.name }} has not been seen for over 1 minute."
+
+      # Container CPU Alert
+      - alert: HighContainerCPU
+        expr: rate(container_cpu_usage_seconds_total[1m]) > 0.8
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU Usage in {{ $labels.name }}"
+          description: "Container {{ $labels.name }} is using more than 80% CPU."
+
+      # Container Memory Alert
+      - alert: HighContainerMemory
+        expr: container_memory_usage_bytes > 0.8 * container_spec_memory_limit_bytes
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High Memory Usage in {{ $labels.name }}"
+          description: "Container {{ $labels.name }} is using more than 80% of its memory limit."

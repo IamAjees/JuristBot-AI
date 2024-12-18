@@ -1,0 +1,343 @@
+pipeline {
+    agent any
+    environment {
+        DOCKER_IMAGE = 'Your-DockerHub-Repository'
+        REMOTE_SERVER_IP = 'Your-Server-IP'
+        CONTAINER_NAME = 'JuristBot'
+        SSH_CREDENTIALS_ID = 'SSH-Login-ID'
+        DOCKER_CREDENTIALS_ID = 'DockerHub-Login-ID'
+        SONARQUBE_URL = 'https://Your-SonarQube-Domain.com/'
+        JAVA_HOME = '/usr/lib/jvm/java-17-openjdk-amd64' 
+        PATH = "${JAVA_HOME}/bin:${env.PATH}"
+        SONAR_SCANNER_OPTS = '-Djavax.net.ssl.trustStorePassword=changeit -Djavax.net.ssl.trustStore=${JAVA_HOME}/lib/security/cacerts'
+    }
+    stages {
+        stage('Clean Workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+
+        stage('Checkout Code') {
+            steps {
+                checkout([$class: 'GitSCM',
+                          branches: [[name: 'main']],
+                          userRemoteConfigs: [[url: 'https://github.com/Dummy/JuristBot-AI.git',
+                                               credentialsId: 'GitHub-Token']]
+                ])
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('Sonar-Server') { // Replace 'Sonar-Server' with your actual SonarQube server configuration name in Jenkins
+                    withCredentials([string(credentialsId: 'Sonar-Admin-Token', variable: 'SONAR_TOKEN')]) {
+                        withEnv(["SONAR_SCANNER_OPTS=${SONAR_SCANNER_OPTS}"]) {
+                            sh '''
+                            java -version
+                            /opt/sonar-scanner/bin/sonar-scanner \
+                            -Dsonar.projectKey=Juristbot-AI \
+                            -Dsonar.sources=. \
+                            -Dsonar.host.url=${SONARQUBE_URL} \
+                            -Dsonar.token=${SONAR_TOKEN} \
+                            -X
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+    steps {
+        script {
+            def sonarProjectKey = 'Juristbot-AI'
+            def sonarHostUrl = 'https://Your-SonarQube-Domain.com'
+
+            // Polling the quality gate status
+            timeout(time: 5, unit: 'MINUTES') {
+                waitUntil {
+                    echo "Checking quality gate status..."
+                    // Using withCredentials to retrieve the SonarQube token securely
+                    withCredentials([string(credentialsId: 'Sonar-Admin-Token', variable: 'SONAR_TOKEN')]) {
+                        // Use curl to get the quality gate status
+                        def response = sh(script: "curl -s -u ${SONAR_TOKEN}: '${sonarHostUrl}/api/qualitygates/project_status?projectKey=${sonarProjectKey}'", returnStdout: true)
+
+                        // Log the full response for debugging
+                        echo "Response Content: ${response}"
+
+                        // Parse the JSON response
+                        def json
+                        try {
+                            json = readJSON(text: response)
+                        } catch (Exception e) {
+                            error "Failed to parse JSON response: ${e.message}"
+                        }
+
+                        def qualityGateStatus = json.projectStatus.status
+                        echo "Quality Gate Status: ${qualityGateStatus}"
+
+                        if (qualityGateStatus == 'OK') {
+                            return true
+                        } else if (qualityGateStatus == 'ERROR') {
+                            error "Quality Gate failed with status: ${qualityGateStatus}"
+                        } else {
+                            echo "Waiting for quality gate result..."
+                            return false
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    def imageTag = "${env.BUILD_NUMBER}"
+                    sh "docker build -t ${DOCKER_IMAGE}:${imageTag} ."
+                    sh "docker tag ${DOCKER_IMAGE}:${imageTag} ${DOCKER_IMAGE}:latest"
+                }
+            }
+        }
+
+        stage('Trivy Vulnerability Scan') {
+    steps {
+        script {
+            def imageTag = "${env.BUILD_NUMBER}" // Replace with your image tag logic
+
+            echo "Running Trivy scan on ${DOCKER_IMAGE}:${imageTag}..."
+
+            // Run Trivy scan and get the exit code
+            def trivyExitCode = sh(
+                script: "trivy image --exit-code 1 --severity HIGH,CRITICAL ${DOCKER_IMAGE}:${imageTag}",
+                returnStatus: true
+            )
+
+            if (trivyExitCode != 0) {
+                echo "CRITICAL vulnerabilities detected during the Trivy scan."
+
+                // Ensure the prompt happens only once
+                def userAction = input(
+                    id: 'TrivyDecision', // Unique ID to avoid duplicate prompts
+                    message: 'Trivy detected HIGH/CRITICAL vulnerabilities. Do you want to Proceed with the vulnerable version or would you like to abort to ensure quality?'
+                )
+
+                if (userAction == 'Abort') {
+                    error "Pipeline aborted due to detected vulnerabilities."
+                } else {
+                    echo "User chose to proceed despite vulnerabilities."
+                }
+            } else {
+                echo "No HIGH/CRITICAL vulnerabilities found. Proceeding."
+            }
+        }
+    }
+}
+        
+        stage('Push Docker Image to Docker Hub') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: "${DOCKER_CREDENTIALS_ID}", usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASSWORD')]) {
+                    script {
+                        def imageTag = "${env.BUILD_NUMBER}"
+                        sh """
+                        echo "${DOCKER_PASSWORD}" | docker login -u "${DOCKER_USER}" --password-stdin
+                        docker push ${DOCKER_IMAGE}:${imageTag}
+                        docker push ${DOCKER_IMAGE}:latest
+                        """
+                    }
+                }
+            }
+        }
+        stage('Remove Docker Image from Jenkins Machine') {
+            steps {
+                script {
+                    def imageTag = "${env.BUILD_NUMBER}"
+                    sh """
+                    docker rmi ${DOCKER_IMAGE}:${imageTag} ${DOCKER_IMAGE}:latest || true
+                    """
+                }
+            }
+        }
+        stage('Test Docker Image') {
+            steps {
+                script {
+                    def userInput = input(
+                        id: 'UserInput', 
+                        message: 'Test Docker Image', 
+                        parameters: [
+                            choice(name: 'RESULT', choices: 'Pass\nFail', description: 'Did the Docker image pass the tests?')
+                        ],
+                        submitter: 'girish' // Only 'Girish-NNT' can submit the input
+                    )
+
+                    // Assuming the input is always submitted by the correct user, no need to check `currentUser` here
+                    if (userInput == 'Fail') {
+                        error 'Docker Image test failed.'
+                    }
+                }
+            }
+        }
+         
+        stage('Approval') {
+            steps {
+                script {
+                    def userInput = input(
+                        message: 'Do you want to proceed with this Deployment?',
+                        submitterParameter: 'APPROVER',
+                        ok: 'Yes',
+                        parameters: [
+                            booleanParam(defaultValue: false, description: 'Approve deployment', name: 'APPROVE_DEPLOYMENT')
+                        ]
+                    )
+                    def approver = userInput['APPROVER']
+                    if (approver.toLowerCase() == 'Project Manager') {
+                        echo 'Approved by Project Manager'
+                    } else {
+                        error "Approval not granted by Project Manager. Only 'Project Manager' is authorized to approve."
+                    }
+                }
+
+        stage('Pull Docker Image from Remote Server') {
+    steps {
+        script {
+            withCredentials([usernamePassword(credentialsId: SSH_CREDENTIALS_ID, usernameVariable: 'SSH_USER', passwordVariable: 'SSH_PASSWORD')]) {
+                withCredentials([usernamePassword(credentialsId: DOCKER_CREDENTIALS_ID, usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASSWORD')]) {
+                    def imageTag = "latest"
+                    sh """
+                    sshpass -p '${SSH_PASSWORD}' ssh -o StrictHostKeyChecking=no ${SSH_USER}@${REMOTE_SERVER_IP} \
+                    "echo '${DOCKER_PASSWORD}' | docker login -u ${DOCKER_USER} --password-stdin && \
+                    docker pull ${DOCKER_IMAGE}:${imageTag}"
+                    """
+                }
+            }
+        }
+    }
+}
+        // Rest of your stages remain the same...
+        stage('Stop Running Container on Remote Server') {
+    steps {
+        script {
+            withCredentials([usernamePassword(credentialsId: SSH_CREDENTIALS_ID, usernameVariable: 'SSH_USER', passwordVariable: 'SSH_PASSWORD')]) {
+                sh """
+                sshpass -p '${SSH_PASSWORD}' ssh -o StrictHostKeyChecking=no ${SSH_USER}@${REMOTE_SERVER_IP} "docker stop ${CONTAINER_NAME} || true && docker rm ${CONTAINER_NAME} || true"
+                """
+            }
+        }
+    }
+}
+stage('Deploy New Container on Remote Server') {
+    steps {
+        script {
+            def imageTag = "latest"
+            withCredentials([usernamePassword(credentialsId: SSH_CREDENTIALS_ID, usernameVariable: 'SSH_USER', passwordVariable: 'SSH_PASSWORD')]) {
+                sh """
+                sshpass -p '${SSH_PASSWORD}' ssh -o StrictHostKeyChecking=no ${SSH_USER}@${REMOTE_SERVER_IP} "docker run -itd --name ${CONTAINER_NAME} -p 8000:8000 ${DOCKER_IMAGE}:${imageTag}"
+                """
+            }
+        }
+    }
+}
+        stage('SendMail') {
+            steps {
+                emailext(
+                    attachLog: true,
+                    to: 'devops@companyname.com, developer@companyname.com, manager@companyname.com',
+                    subject: '$DEFAULT_SUBJECT',
+                    mimeType: 'text/html', 
+                    body: '''<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body {
+            font-family: 'Helvetica Neue', Arial, sans-serif;
+            color: #333;
+            background-color: #f0f2f5;
+            margin: 0;
+            padding: 0;
+        }
+        .email-container {
+            max-width: 600px;
+            margin: 30px auto;
+            background: #16daf9;
+            border-radius: 10px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+            overflow: hidden;
+        }
+        .email-header {
+            background: linear-gradient(90deg, #0033cc 0%, #0066ff 100%);
+            color: #ffffff;
+            padding: 20px;
+            text-align: center;
+        }
+        .email-header h1 {
+            margin: 0;
+            font-size: 28px;
+            font-weight: bold;
+        }
+        .email-body {
+            padding: 20px;
+            background-color: #FCF8F3;
+        }
+        .email-body p {
+            line-height: 1.6;
+            margin: 10px 0;
+        }
+        .button {
+            display: inline-block;
+            padding: 12px 20px;
+            font-size: 16px;
+            color: #ffffff;
+            background-color: #EEEEEE; 
+            text-decoration: none;
+            border-radius: 5px;
+            margin: 20px 0;
+            font-weight: bold;
+            text-align: center;
+        }
+        .button:hover {
+            background-color: #ffffff; 
+        }
+        .footer {
+            background-color: #e9ecef;
+            text-align: center;
+            padding: 15px;
+            font-size: 14px;
+            color: #6c757d;
+        }
+        .footer a {
+            color: #0044cc;
+            text-decoration: none;
+        }
+        .footer a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="email-container">
+        <div class="email-header">
+            <h1>Deployment Notification</h1>
+        </div>
+        <div class="email-body">
+            <p>Hello Team,</p>
+            <p> YOUR MAIL CONTENT</p>
+            <p>To view the build, please visit the link below:</p>
+            <p><a href="https://Your-App-Domain.com/" class="button">Visit the Website</a></p>
+        <div class="footer">
+            <p>Best Regards,<br>The DevOps Team</p>
+            <p><a href="mailto:DevOps@companyname.com">Contact Us</a></p>
+            <p><strong><a href="https://yourcompanyname.com">YOUR COMPANY NAME</a></strong></p>
+        </div>
+    </div>
+</body>
+</html>''',
+                    from: 'jenkins@companyname.com',
+                    replyTo: 'devops@companyname.com',
+                    attachmentsPattern: '**/build.log'
+                )
+            }
+        }
+    }
+}
